@@ -1,428 +1,390 @@
-//Standard C libraries
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <math.h>
+import sys
+import math
+#import torch
+import numpy as np
+import scipy as sp
+# import numba as nb
+import matplotlib
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
 
-//Custom library for allocating the 2D array grid
-#include "arrays.h"
+#from torch import nn
+# from numba import njit
+from time import sleep
+from IPython import display
+from matplotlib.animation import FuncAnimation
 
-//C Library of time for random seed usage
-#include <time.h>
+def create_grid(n_y, n_x, n_pol, n_theta):
+    return np.zeros([n_y, n_x, n_pol, n_theta])
 
-//Constants of the simulation
-const int N_x = 200; //Number of sites in the X direction
-const int N_y = 200; //Number of sites in the Y direction
+def ressample(arr, N):
+    A = []
+    for v in np.vsplit(arr, arr.shape[0] // N):
+        A.extend([*np.hsplit(v, arr.shape[0] // N)])
+    return np.array(A)
 
-const double max_abs_p = 2.0;
-const double min_abs_p = 0.0;
+class tissue(object):
+    def __init__(self, ini_grid):
+        self.real_lattice = ini_grid
+        self.n_theta = len(self.real_lattice[0,0,0,:])
+        self.n_pol = len(self.real_lattice[0,0,:,0])
+        self.n_x = len(self.real_lattice[0,:,0,0])
+        self.n_y = len(self.real_lattice[:,0,0,0])
+        self.lattice = np.zeros([self.n_y,self.n_x,self.n_theta,self.n_pol])
 
-const double max_theta = 2.0;
-const double min_theta = -2.0;
+        self.kappa = 0.0
+        self.gamma = 0.0
+        self.D_theta = 0.0
+        self.D_para_dir = 0.0
+        self.D_perp_dir = 0.0
 
-const double kappa = 1.0;
+        self.max_x = (1./(np.sqrt(2)))*self.n_x
+        self.max_y = (1./(np.sqrt(2)))*self.n_y
+        
+    def diffusion_para_dir(self):
+        D = self.D_para_dir
+        aux = np.zeros((self.n_y,self.n_x,self.n_theta,self.n_pol))
+        kernel= np.array([[0.,0.,0.],
+                        [0.5,-1.,0.5],
+                        [0.,0.,0.]])
 
-const double D_r_par = 0.0;
-const double D_r_perp = 0.0;
+        for i in range(0, self.n_theta):
+            for j in range(0, self.n_pol):
+                aux[:,:,i,j] = self.lattice[:,:,i,j] + D*sp.signal.convolve2d(self.lattice[:,:,i,j], kernel, mode="same", boundary="wrap")
+        self.lattice = np.copy(aux)
 
-const double D_theta = 0.0;
+    def diffusion_perp_dir(self):
+        D = self.D_perp_dir
+        aux = np.zeros((self.n_y,self.n_x,self.n_theta,self.n_pol))
 
-const double D_p = 0.0;
+        kernel= np.array([[0.,0.5,0.],
+                    [0.,-1.,0.],
+                    [0.,0.5,0.]])
 
-const int t_max = 200; //Number of iterations
+        for i in range(0, self.n_theta):
+            for j in range(0, self.n_pol):
+                aux[:,:,i,j] = self.lattice[:,:,i,j] + D*sp.signal.convolve2d(self.lattice[:,:,i,j], kernel, mode="same", boundary="wrap")
+        self.lattice = np.copy(aux)
 
-const double dt = 1.0; //Time step dt, must be an integer as we are considering a discrete system
-const double dx = 1.0; //Spacing between each point of the grid in the X direction, must also be an integer as we are considering a discrete system
-const double dy = 1.0; //Spacing between each point of the grid in the Y direction, must also be an integer as we are considering a discrete system
+    def drift_para_dir(self):
+        # ROLL METHOD (Uses numpy function roll to convect the pulse in a forwards direction)
+        for i in range(0, self.n_theta):
+            for j in range(0, self.n_pol):
+                self.lattice[:,:,i,j] = np.roll(self.lattice[:,:,i,j], j, axis=1)
+                 #self.lattice[:,:,i,j] = np.roll(self.lattice[:,:,i,j], j+1, axis=1)
+                 #Introduce velocity dynamics (dissipation, diffusion and from 0 to 1)
+                 # The "j+1" term is a quick fix, the correct method should be gathering all particles with j=0 and redistributing then in all orientations
+                 #equally distributed and with j=1 in all of these orientations
+                 
+        # STANDARD METHOD (Same results for both methods)
+        # aux = np.zeros((self.n_y,self.n_x,self.n_theta,self.n_pol))
+        # for i in range(0, self.n_theta):
+        #     for j in range(0, self.n_pol):
+        #         for y in range(0, self.n_y):
+        #             for x in range(0, self.n_x):
+        #                 v_drift = int((j)*self.kappa)
+        #                 aux[y,x,i,j] = self.lattice[y-v_drift,x,i,j]
+        # self.lattice = np.copy(aux)
 
-//The amount of displacement (read velocity in a classical system), which is the ratio of displecement and time interval must also be an integer
+    def diffusion_theta(self):
+ini_grid = create_grid(N,N,12,12)
+        D = self.D_theta
+        aux = np.zeros((self.n_y,self.n_x,self.n_theta,self.n_pol))
+        for j in range(0, self.n_pol):
+            for i in range(0, self.n_theta):
+                i_min = i-1
+                if (i_min<0): i_min = self.n_theta-1
+                i_plus = i+1
+                if (i_plus>self.n_theta-1): i_plus = 0
 
-void initial_conditions(double ****rho);
-void simulation(double ****rho, double ****rho_new, double **rho_real, FILE *density);
+                diff = 0.5*(self.real_lattice[:,:,i_min,j] + self.real_lattice[:,:,i_plus,j] - 2.*self.real_lattice[:,:,i,j])
+                aux[:,:,i,j] = self.real_lattice[:,:,i,j] + D*diff
 
-int main (void)
-{
-  //Creates the arrays used in the simulation
-  double ****rho;
-  double ****rho_new;
-  double **rho_real;
+        self.real_lattice = np.copy(aux)
 
-  double n_abs_p, n_theta;
-  n_abs_p = (int)(max_abs_p - min_abs_p);
-  n_theta = (int)(max_theta - min_theta);
-  
-  //Creates an output file for the probability densities and simulation storage
-  FILE *output;
-  create_file(&output, "data.dat", "w");
+    def polarization_dynamics_dissipation(self):
+        aux = np.zeros((self.n_y,self.n_x,self.n_theta,self.n_pol))
+        for i in range(0, self.n_theta):
+            for j in range(0, self.n_pol):
+                for x in range(0, self.n_x):
+                    for y in range(0, self.n_y):
+                        j_diss = int((j+self.gamma))
+                        if j_diss < self.n_pol:
+                            aux[y,x,i,j] = self.lattice[y,x,i,j_diss]
+                        else:
+                            aux[y,x,i,j] = self.lattice[y,x,i,j]
+        self.lattice = np.copy(aux)
     
-  printf("\n #Created File \n");
-  
-  //Allocates the previously created arrays using the functions from "arrays.h" library
-  printf("\n #Initializing Grid \n");
- 
-  rho = create_4d_grid(N_x, N_y, n_abs_p, n_theta);
-  rho_new = create_4d_grid(N_x, N_y, n_abs_p, n_theta);
-  rho_real = create_2d_grid(N_x, N_y);
+    def to_real_lattice(self):
+        aux = np.zeros((self.n_y,self.n_x,self.n_theta,self.n_pol))
+        for i in range(0, self.n_theta):
+            if (self.lattice[:,:,i,:].any() == True):
+                for j in range(0, self.n_pol):
+                    if (self.lattice[:,:,i,j].any() == True):
+                        for x in range(0,self.n_x):
+                            if (self.lattice[:,x,i,j].any() == True):
+                                for y in range(0,self.n_y):
+                                    d_theta = i*(2.*np.pi/self.n_theta) - np.pi
+                                    
+                                    y_real = y - self.n_y/2.
+                                    x_real = x - self.n_x/2.
+                                    
+                                    x_new = x_real*np.cos(d_theta) - y_real*np.sin(d_theta) + self.n_x/2.
+                                    y_new = x_real*np.sin(d_theta) + y_real*np.cos(d_theta) + self.n_y/2.
+                                    
+                                    x_new = self.wrap(x_new,self.n_x-1)
+                                    y_new = self.wrap(y_new,self.n_y-1)
+                                    
+                                    aux[y_new,x_new,i,j] += self.lattice[y,x,i,j]
+        self.real_lattice = np.copy(aux)
+    
+    def from_real_lattice(self):
+        aux = np.zeros((self.n_y,self.n_x,self.n_theta,self.n_pol))
+        for i in range(0, self.n_theta):
+            if (self.real_lattice[:,:,i,:].any() == True):
+                for j in range(0, self.n_pol):
+                    if (self.real_lattice[:,:,i,j].any() == True):
+                        for x in range(0,self.n_x):
+                            if (self.real_lattice[:,x,i,j].any() == True):
+                                for y in range(0,self.n_y):
+                                    d_theta = i*(2.*np.pi/self.n_theta) - np.pi
+                                    y_real = y - self.n_y/2.
+                                    x_real = x - self.n_x/2.
+                                    
+                                    x_new = x_real*np.cos(d_theta) + y_real*np.sin(d_theta) + self.n_x/2.
+                                    y_new = -x_real*np.sin(d_theta) + y_real*np.cos(d_theta) + self.n_y/2.
+                                    
+                                    #WHY DID I HAVE TO ADD 0.15 TO THESE VARIABLES?????? IF I DO NOT ADD THESE, SOME PULSES STOPPING
+                                    #I DO NOT KNOW THE REASON OF WHY THE PULSES STOP
+                                    x_new = self.wrap(x_new+0.15,self.n_x-1)
+                                    y_new = self.wrap(y_new+0.15,self.n_y-1)
+                                    
+                                    aux[y_new,x_new,i,j] += self.real_lattice[y,x,i,j]
+        self.lattice = np.copy(aux)
 
-  printf("\n #Setting Initial Conditions \n");
-  initial_conditions(rho);
-  
-  printf("\n #Running Dynamics \n");
-  simulation(rho, rho_new, rho_real, output);
-  
-  printf("\n #Simulation Finished \n");
-  
-  return 0;
-}
+    #Try to apply the numba function to speed up the process
+    def real_periodic_boundary(self):
+        self.to_real_lattice()
+        for i in range(0, self.n_theta):
+            if (self.real_lattice[:,:,i,:].any() == True):
+                for j in range(0, self.n_pol):
+                    if (self.real_lattice[:,:,i,j].any() == True):
+                        for x in range(0, self.n_x):
+                            if (self.real_lattice[:,x,i,j].any() == True):
+                                for y in range(0, self.n_y):
+                                    if x > self.n_x/2. + self.max_x/2.:
+                                        aux = self.real_lattice[y,x,i,j]
+                                        self.real_lattice[y,x,i,j] = 0.
+                                        self.real_lattice[y,x-int(self.max_x),i,j] = self.real_lattice[y,x-int(self.max_x),i,j] + aux
+                                    if y > self.n_x/2. + self.max_y/2.:
+                                        aux = self.real_lattice[y,x,i,j]
+                                        self.real_lattice[y,x,i,j] = 0.
+                                        self.real_lattice[y-int(self.max_y),x,i,j] = self.real_lattice[y-int(self.max_y),x,i,j] + aux
+                                    if x < self.n_x/2. - self.max_x/2.:
+                                        aux = self.real_lattice[y,x,i,j]
+                                        self.real_lattice[y,x,i,j] = 0.
+                                        self.real_lattice[y,x+int(self.max_x),i,j] = self.real_lattice[y,x+int(self.max_x),i,j] + aux
+                                    if y < self.n_x/2. - self.max_y/2.:
+                                        aux = self.real_lattice[y,x,i,j]
+                                        self.real_lattice[y,x,i,j] = 0.
+                                        self.real_lattice[y+int(self.max_y),x,i,j] = self.real_lattice[y+int(self.max_y),x,i,j] + aux
+        self.from_real_lattice()
 
-void initial_conditions(double ****rho)
-{
-  int l, m;
+    def collision_real_lattice(self):
+        aux = np.copy(self.real_lattice)
+        
+        for y in range(0,self.n_y):
+            if (self.real_lattice[y,:,:,:].any() == True):
+                for x in range(0,self.n_x):
+                    if (self.real_lattice[y,x,:,:].any() == True):
+                        for j in range(0, self.n_theta):
+                            if (self.real_lattice[y,x,j,:].any() == True):
+                                for l in range(0, self.n_pol):
+                                    trans_factor = 0.
+                                    norm_factor = 0.
+                                    
+                                    mean_pn_x = 0.
+                                    mean_pn_y = 0.
+                        
+                                    for m in range(0, self.n_theta):
+                                        if (self.real_lattice[y,x,m,:].any() == True):
+                                            for n in range(0, self.n_pol):
+                                                if m!=j or n!=l:
+                                                    trans_factor += self.real_lattice[y,x,j,l] * self.real_lattice[y,x,m,n]
+                                                    norm_factor += self.real_lattice[y,x,m,n]
+                                                    
+                                                    p_n = (n) # * self.kappa 
+                                                    theta_m = m*(2.*np.pi/self.n_theta) 
+                                                    mean_pn_x += self.real_lattice[y,x,m,n] * p_n * np.cos(theta_m)
+                                                    mean_pn_y += self.real_lattice[y,x,m,n] * p_n * np.sin(theta_m)
+                                    
+                                    p_l = l # * self.kappa
+                                    
+                                    theta_l = l*(2.*np.pi/self.n_theta) 
+                                    theta_k = np.arctan2(mean_pn_y,mean_pn_x) #+ np.pi
+        
+                                    px_new = 0.5 * ( p_l * np.cos(theta_l) + mean_pn_x)
+                                    py_new = 0.5 * ( p_l * np.sin(theta_l) + mean_pn_y)
+                                    
+                                    theta_new = np.arctan2(py_new,px_new) #+ np.pi
+                                    
+                                    p_new = np.sqrt(px_new**2 + py_new**2)
+                                    
+                                    j_new = self.wrap((int(theta_new*(self.n_theta/(2.*math.pi)))),self.n_theta-1)
+                                    l_new = round(p_new)
+                                    l_new = self.n_pol-1 if l_new >= self.n_pol else l_new
+                                    
+                                    # if trans_factor!=0.:
+                                        # print(theta_l, theta_k, theta_new, (theta_l+theta_k)/2., trans_factor)
+                                    
+                                    aux[y,x,j_new,l_new] += trans_factor
+                                    aux[y,x,j,l] -= trans_factor
+                            
+        self.real_lattice = np.copy(aux)
+                                
+                                
+    def percolated_diffusion(self):
+        aux = np.zeros((self.n_y,self.n_x,self.n_theta,self.n_pol))
+        D = 0.1
+        C_d = 10.0
+        
+        #Normalizar a densidade para a densidade máxima de uma célula apenas para fazer a probabilidade de transição
+        #Do not use this loop conditional, it is causing probability to leak
+        # if (self.real_lattice[y,:,:,:].any() == True):
 
-  int n_abs_p, n_theta;
-  n_abs_p = (int)(max_abs_p - min_abs_p);
-  n_theta = (int)(max_theta - min_theta);
 
-  //Initial conditions of the system
-  
-  for(l=0 ; l<n_abs_p ; l++){
-    for(m=0 ; m<n_theta ; m++){
-      /*
-      rho[N_x/2+3][N_y/2+3][l][m] = 0.05;
-      rho[N_x/2+1][N_y/2+2][l][m] = 0.1;
-      rho[N_x/2+2][N_y/2+1][l][m] = 0.1;
-      rho[N_x/2+2][N_y/2+2][l][m] = 0.4;
-      rho[N_x/2+2][N_y/2+3][l][m] = 0.1;
-      rho[N_x/2+3][N_y/2+2][l][m] = 0.1;
-      rho[N_x/2+1][N_y/2+1][l][m] = 0.05;
-      rho[N_x/2+1][N_y/2+4][l][m] = 0.05;
-      rho[N_x/2+4][N_y/2+1][l][m] = 0.05;
-      */
-      
-      //rho[0][3][l][m] = 0.05;
-      //rho[1][2][l][m] = 0.1;
-      //rho[2][1][l][m] = 0.1;
-      //rho[2][2][l][m] = 0.4;
-      //rho[2][3][l][m] = 0.1;
-      //rho[3][2][l][m] = 0.1;
-      //rho[1][1][l][m] = 0.05;
-      //rho[1][4][l][m] = 0.05;
-      //rho[4][1][l][m] = 0.05;
+        for y in range(1,self.n_y-1):
+            # if (self.real_lattice[y,:,:,:].any() == True):
+                for x in range(1,self.n_x-1):
+                    # if (self.real_lattice[y,x,:,:].any() == True):
+                        for i in range(0, self.n_theta):
+                            # if (self.real_lattice[y,x,i,:].any() == True):
+                                for j in range(0, self.n_pol):
 
-      rho[N_x/2][N_y/2][l][m] = 1.0;
-      //rho[0][0][l][m] = 1.0;
-    }
-  }
-  return ;
-}
+                                    P_x_out = D*(self.real_lattice[y,x,i,j] * ( np.exp(-C_d*self.real_lattice[y,x+1,i,j]) + np.exp(-C_d*self.real_lattice[y,x-1,i,j]) ))
+                                    P_x_in = D*(np.exp(-C_d*self.real_lattice[y,x,i,j]) * ( self.real_lattice[y,x+1,i,j] + self.real_lattice[y,x-1,i,j] ))
 
-void simulation(double ****rho, double ****rho_new, double **rho_real, FILE *density)
-{
-  int t;
+                                    P_y_out = D*(self.real_lattice[y,x,i,j] * ( np.exp(-C_d*self.real_lattice[y+1,x,i,j]) + np.exp(-C_d*self.real_lattice[y-1,x,i,j]) ))
+                                    P_y_in = D*(np.exp(-C_d*self.real_lattice[y,x,i,j]) * ( self.real_lattice[y+1,x,i,j] + self.real_lattice[y-1,x,i,j] ))
+                                    
+                                    aux[y,x,i,j] = self.real_lattice[y,x,i,j] + P_x_in - P_x_out + P_y_in - P_y_out 
+                                    
+                                    # kernel= np.array([[0.,0.5*P_y_in,0.],
+                                        # [0.5*P_x_in,-(P_x_out + P_y_out),0.5*P_x_in],
+                                        # [0.,0.5*P_y_in,0.]])
+                                    # aux[y,x,i,j] = self.real_lattice[y,x,i,j] + sp.signal.convolve2d(self.real_lattice[:,:,i,j], kernel, mode="same", boundary="wrap")
+        self.real_lattice = np.copy(aux)
+        # aux = np.zeros((self.n_y,self.n_x,self.n_theta,self.n_pol))
+        
+        #The interactions must be on the real lattice right?
+        #But then how do I evolve the convection in the self lattice?
+        #Do I create a Metropolis like algorithm? Where there is a probability of acceptance after the 
+        #The convection ocurre in the self lattice but it had low probability of doing so in the real lattice due to interactions?
+                
 
-  int a, b;
+    def print_state(self):
+        aux = np.zeros([self.n_y,self.n_x])
+        for i in range(0, self.n_theta):
+            for j in range(0, self.n_pol):
+                # aux[:,:] = aux[:,:] + self.lattice[:,:,i,j]
+                aux[:,:] = aux[:,:] + self.real_lattice[:,:,i,j]
 
-  int dl, dm;
-  int i,j,l,m;
-  int i_aux, j_aux;
-  int i_m_aux, i_p_aux, j_m_aux, j_p_aux; 
-  
-  int dr_p, dr_m;
-  int dp_p, dp_m;
-  int i_real, j_real;
-  int n_abs_p, n_theta;
-  int dtheta_p, dtheta_m;
-  int drx_p, drx_m, dry_p, dry_m;
+        heatmap = ax.pcolormesh(aux, cmap='hot')
+        return heatmap
+        
+    def wrap(self,val,max_val):
+        return round(val - max_val * math.floor(val/max_val))
 
-  double R;
-  double norm;
-  double theta;
-  double total;
-  double angle;
-  double abs_p;
-  double v_drift;
-  double D_px, D_py;
-  
-  double zero_sum[N_x][N_y];
-  for(i = 0 ; i < N_x ; i++){
-    for(j = 0 ; j < N_y ; j++){
-      zero_sum[i][j] = 0.0;
-    }
-  }
+    def total(self):
+        prob = np.sum(np.concatenate(self.real_lattice))
+        # prob = np.sum(np.concatenate(self.lattice))
+        return prob
+    
+    def test(self,time):
+        for x in range(0,self.n_x):
+            for y in range(0,self.n_y):
+                for j in range(0, self.n_theta):
+                    for l in range(0, self.n_pol):
+                        if self.lattice[y,x,j,l]!=0:
+                            d_theta = j*(2.*np.pi/self.n_theta) - np.pi
+                                    
+                            y_real = y - self.n_y/2.
+                            x_real = x - self.n_x/2.
+                            
+                            x_new = x_real*np.cos(d_theta) - y_real*np.sin(d_theta) + self.n_x/2.
+                            y_new = x_real*np.sin(d_theta) + y_real*np.cos(d_theta) + self.n_y/2.
+                            
+                            x_new = self.wrap(x_new,self.n_x-1)
+                            y_new = self.wrap(y_new,self.n_y-1)
+                            print(self.lattice[y,x,j,l], self.real_lattice[y_new,x_new,j,l], time)
 
-  n_abs_p = (int)(max_abs_p - min_abs_p);
-  n_theta = (int)(max_theta - min_theta);
-   
-  //Time loop of the simulation
-  for(t = 0 ; t < t_max ; t++ )
-    {
-      total = 0.0;
-      //CONVECTION (DRIFT) in the parallel direction
-      for(i = 0 ; i < N_x ; i++){
-	for(j = 0 ; j < N_y ; j++){
-	  for(l = 0 ; l < n_abs_p ; l++){
-	    for(m = 0 ; m < n_theta ; m++){ 
-	      v_drift = (int)(kappa * n_abs_p);
-	      drx_m = i - v_drift;
-	      drx_m = wrap_grid(drx_m,N_x);
-	      
-	      rho_new[i][j][l][m] = rho[drx_m][j][l][m];
-	    }
-	  }
-	}
-      }
-      //Loops for the update of the grid in time T to time T + dt (Sincronous method we update all sites of the grid onto a new grid in a sincronous way)
-      for(i = 0 ; i < N_x ; i++){
-	for(j = 0 ; j < N_y ; j++){
-	  for(l = 0 ; l < n_abs_p ; l++){
-	    for(m = 0 ; m < n_theta ; m++){ 
-	      rho[i][j][l][m] = rho_new[i][j][l][m];
-	    }
-	  }
-	}
-      } 
-      
-      //DIFFUSION in the perpendicular direction
-      for(i = 0 ; i < N_x ; i++){
-	for(j = 0 ; j < N_y ; j++){
-	  for(l = 0 ; l < n_abs_p ; l++){
-	    for(m = 0 ; m < n_theta ; m++){ 
-	      dr_m = j-1;
-	      dr_m = wrap_grid(dr_m,N_y);
-	      
-	      dr_p = j+1;
-	      dr_p = wrap_grid(dr_p,N_y);
-	      
-	      rho_new[i][j][l][m] = rho[i][j][l][m] + 0.5*D_r_perp*(rho[i][dr_m][l][m] + rho[i][dr_p][l][m] - 2.0*rho[i][j][l][m]);
-	    }
-	  }
-	}
-      }
-      //Loops for the update of the grid in time T to time T + dt (Sincronous method we update all sites of the grid onto a new grid in a sincronous way)
-      for(i = 0 ; i < N_x ; i++){
-	for(j = 0 ; j < N_y ; j++){
-	  for(l = 0 ; l < n_abs_p ; l++){
-	    for(m = 0 ; m < n_theta ; m++){ 
-	      rho[i][j][l][m] = rho_new[i][j][l][m];
-	    }
-	  }
-	}
-      }
-      
-      //Diffusion in the parallel direction
-      for(i = 0 ; i < N_x ; i++){
-	for(j = 0 ; j < N_y ; j++){
-	  for(l = 0 ; l < n_abs_p ; l++){
-	    for(m = 0 ; m < n_theta ; m++){
-	      dr_m = i-1;
-	      dr_m = wrap_grid(dr_m,N_x);
-	      
-	      dr_p = i+1;
-	      dr_p = wrap_grid(dr_p,N_x);
-	      
-	      rho_new[i][j][l][m] = rho[i][j][l][m] + 0.5*D_r_par*(rho[dr_m][j][l][m] + rho[dr_p][j][l][m] - 2.0*rho[i][j][l][m]);
-	    }
-	  }
-	}
-      }
-      for(i = 0 ; i < N_x ; i++){
-	for(j = 0 ; j < N_y ; j++){
-	  for(l = 0 ; l < n_abs_p ; l++){
-	    for(m = 0 ; m < n_theta ; m++){ 
-	      rho[i][j][l][m] = rho_new[i][j][l][m];
-	    }
-	  }
-	}
-      }
+#############################################################################
+np.set_printoptions(threshold=np.inf)
+file = open('prob_sum.dat', 'w')
+video_name = "simu"
 
-      for(i = 0 ; i < N_x ; i++){
-	for(j = 0 ; j < N_y ; j++){
-	  R = sqrt(1.0*(i-N_x/2.0)*(i-N_x/2.0) + 1.0*(j-N_y/2.0)*(j-N_y/2.0));
-	  angle = atan2(1.0*(j-N_y/2.0),1.0*(i-N_x/2.0));
+total_time = 100
+anim_fps = 5
 
-	  for(m = 0 ; m < n_theta ; m++){
-	    
-	    i_real = (int)(R*cos(-2.0*m*M_PI/n_theta + angle) + 0.5);
-	    i_real = wrap_grid(i_real,N_x);
-	    
-	    j_real = (int)(R*sin(-2.0*m*M_PI/n_theta + angle) + 0.5);
-	    j_real = wrap_grid(j_real,N_y);
+N = 20
+ini_grid = create_grid(N,N,12,12)
 
-	    zero_sum[i_real][j_real] = zero_sum[i_real][j_real] + rho[i][j][0][m];
-	  }
-	}
-      }
+#When setting up the initial conditions X' and Y' are rotated depending on theta, so when initializing as X and Y will actually put the pulse at position X' and Y', which are rotated positions
+#I have to fix this, so I should assign the cells at the real lattice and then transfer the allocated data to the self lattice.
+ini_grid[int(N/2.)-5,int(N/2.),3,1] = 1./2.
+ini_grid[int(N/2.)+5,int(N/2.),0,1] = 1./2.
 
-      for(i_real = 0 ; i_real < N_x ; i_real++){
-	for(j_real = 0 ; j_real < N_y ; j_real++){
-	  R = sqrt(1.0*(i_real-N_x/2.0)*(i_real-N_x/2.0) + 1.0*(j_real-N_y/2.0)*(j_real-N_y/2.0));
-	  angle = atan2(1.0*(j_real-N_y/2.0),1.0*(i_real-N_x/2.0));
+#[y_axis, x_axis, theta, polarization]
+# ini_grid[int(N/2.),int(N/2.),0,0] = 1.
 
-	  for(m = 0 ; m < n_theta ; m++){
-	    i = (int)(R*cos(2.0*m*M_PI/n_theta + angle) + 0.5);
-	    i = wrap_grid(i,N_x);
+#WHY ARE THE CELLS STOPPING AT RANDOM SPOTS????????????
+#YOU MUST FIX THE CHANGE OF POLARIZATION DYNAMICS, THAT PASS CELLS WITH ZERO TO ONE IN ALL ORIENTATIONS
 
-	    j = (int)(R*sin(2.0*m*M_PI/n_theta + angle) + 0.5);
-	    j = wrap_grid(j,N_y);
-	    
-	    rho_new[i][j][1][m] = rho[i][j][1][m] + zero_sum[i_real][j_real]/((float)(n_theta));
-	  }
-	}
-      }
-      for(i = 0 ; i < N_x ; i++){
-	for(j = 0 ; j < N_y ; j++){
-	  zero_sum[i][j] = 0.0;
-	  for(l = 1 ; l < n_abs_p ; l++){
-	    for(m = 0 ; m < n_theta ; m++){ 
-	      rho[i][j][l][m] = rho_new[i][j][l][m];
-	    }
-	  }
-	}
-      }
+fig, ax = plt.subplots()
 
-      //Diffusion in the polarization absolute val
-      for(i = 0 ; i < N_x ; i++){
-	for(j = 0 ; j < N_y ; j++){
-	  for(l = 1 ; l < n_abs_p ; l++){
-	    for(m = 0 ; m < n_theta ; m++){
-	      dp_m = l-1;
-	      dp_m = wrap_grid(dp_m,n_abs_p);
+tissue = tissue(ini_grid)
+tissue.D_theta = 0.1
+tissue.D_para_dir = 0.1
+tissue.D_perp_dir = 0.1
+tissue.kappa = 1.
+tissue.gamma = 1.
 
-	      dp_p = l+1;
-	      dp_p = wrap_grid(dp_p,n_abs_p);
-	      
-	      rho_new[i][j][l][m] = rho[i][j][l][m] + 0.5*D_p*(rho[i][j][dp_m][m] + rho[i][j][dp_p][m] - 2.0*rho[i][j][l][m]);
-	    }
-	  }
-	}
-      }
-      for(i = 0 ; i < N_x ; i++){
-	for(j = 0 ; j < N_y ; j++){
-	  for(l = 0 ; l < n_abs_p ; l++){
-	    for(m = 0 ; m < n_theta ; m++){ 
-	      rho[i][j][l][m] = rho_new[i][j][l][m];
-	    }
-	  }
-	}
-      }
+tissue.from_real_lattice()
 
-      //Diffusion in the polarization orientation
+def update(frame):
+        tissue.drift_para_dir()
+        # tissue.real_periodic_boundary()
+        tissue.diffusion_para_dir()
+        # tissue.real_periodic_boundary()
+        tissue.diffusion_perp_dir()
+        # tissue.polarization_dynamics_dissipation()
+        tissue.real_periodic_boundary()
+    
+        tissue.to_real_lattice()
+        # tissue.diffusion_theta()
+        tissue.percolated_diffusion() #For testing purposes, this function is producing the usual diffusion
+        # tissue.collision_real_lattice()
+        tissue.from_real_lattice()
+        
+        # tissue.test(time)
+    
+        if (frame%10==0):
+            ax.clear()
+    
+        if (frame>=total_time):
+           anim.event_source.stop()
+    
+        stats = str(frame)+" "+str(tissue.total())
+        # print(stats,file=file)
+        print(stats)
+        
+        heatmap = tissue.print_state()
 
-      for(i = 0 ; i < N_x ; i++){
-	for(j = 0 ; j < N_y ; j++){
-	  
-	  R = sqrt(1.0*(i-N_x/2.0)*(i-N_x/2.0) + 1.0*(j-N_y/2.0)*(j-N_y/2.0));
-	  angle = atan2(1.0*(j-N_y/2.0),1.0*(i-N_x/2.0));
-	  
-	  for(l = 1 ; l < n_abs_p ; l++){
-	    for(m = 0 ; m < n_theta ; m++){
+anim = FuncAnimation(fig, update, frames=total_time, interval=total_time/anim_fps)
+# plt.show()
 
-	      dtheta_m = m-1;
-	      dtheta_m = wrap_grid(dtheta_m,n_theta);
-	      
-	      dtheta_p = m+1;
-	      dtheta_p = wrap_grid(dtheta_p,n_theta);
-	      
-	      if (i==0 && j==0) {
-		drx_p = 0;
-		drx_m = 0;
+writervideo = animation.FFMpegWriter(fps=anim_fps)
+anim.save(video_name+".mp4", writer=writervideo)
 
-		dry_p = 0;
-		dry_m = 0;
-	      }
-	      else {
-		drx_p=(int)(R*cos(angle-(dtheta_p-m)*2.0*M_PI/n_theta)+0.5);
-		drx_p = wrap_grid(drx_p,N_x);
-
-		dry_p=(int)(R*sin(angle-(dtheta_p-m)*2.0*M_PI/n_theta)+0.5);
-		dry_p = wrap_grid(dry_p,N_x);
-		
-                drx_m=(int)(R*cos(angle-(dtheta_m-m)*2.0*M_PI/n_theta)+0.5);
-		drx_m = wrap_grid(drx_m,N_x);
-		
-                dry_m=(int)(R*sin(angle-(dtheta_m-m)*2.0*M_PI/n_theta)+0.5);
-		dry_m = wrap_grid(dry_m,N_x);
-	      }
-	      
-	      rho_new[i][j][l][m] = rho[i][j][l][m] + 0.5*D_theta*(rho[drx_m][dry_m][l][dtheta_m] + rho[drx_p][dry_p][l][dtheta_p] - 2.0*rho[i][j][l][m]);
-	    }
-	  }
-	}
-      }
-      for(i = 0 ; i < N_x ; i++){
-	for(j = 0 ; j < N_y ; j++){
-	  for(l = 0 ; l < n_abs_p ; l++){
-	    for(m = 0 ; m < n_theta ; m++){ 
-	      rho[i][j][l][m] = rho_new[i][j][l][m];
-	    }
-	  }
-	}
-      }
-      
-      //Conversion from the self grid to the real grid
-      for(i = 0 ; i < N_x ; i++){
-	for(j = 0 ; j < N_y ; j++){
-	  R = sqrt(1.0*(i-N_x/2.0)*(i-N_x/2.0) + 1.0*(j-N_y/2.0)*(j-N_y/2.0));
-	  angle = atan2(1.0*(j-N_y/2.0),1.0*(i-N_x/2.0));
-	  
-	  for(l = 0 ; l < n_abs_p ; l++){
-	    for(m = 0 ; m < n_theta ; m++){
-	      
-	      i_real = (int)(R*cos(2.0*m*M_PI/n_theta + angle) + 0.5);
-	      i_real = wrap_grid(i_real,N_x);
-	      
-	      j_real = (int)(R*sin(2.0*m*M_PI/n_theta + angle) + 0.5);
-	      j_real = wrap_grid(j_real,N_y);
-
-	      /*if (i_real*i_real + j_real*j_real > N_x*N_x){
-		i_real = -i_real;
-		j_real = -j_real;
-		}*/
-
-	      i_real = wrap_grid(i_real,N_x);
-	      j_real = wrap_grid(j_real,N_y);
-	      
-	      if (i_real <= N_x/2 && j_real <= N_y/2){
-		a = (float)i_real + (float)N_x/2;
-		b = (float)j_real + (float)N_y/2;
-	      }
-
-	      if (i_real <= N_x/2 && j_real > N_y/2 ){
-		a = (float)i_real + (float)N_x/2;
-		b = (float)j_real - (float)N_x/2;
-	      }
-
-	      if (i_real > N_x/2 && j_real <= N_y/2 ){
-		a = (float)i_real - (float)N_x/2;
-		b = (float)j_real + (float)N_y/2;
-	      }
-	  
-	      if (i_real > N_x/2 && j_real > N_y/2 ){
-		a = (float)i_real - (float)N_x/2;
-		b = (float)j_real - (float)N_y/2;
-	      }
-
-	      a = (int)wrap_grid(a,N_x);
-	      b = (int)wrap_grid(b,N_y);
-
-	      //rho_real[a][b] = rho_real[a][b] + rho[i][j][l][m];
-	      rho_real[i_real][j_real] = rho_real[i_real][j_real] + rho[i][j][l][m];
-	    }
-	  }
-	}
-      }
-      for(i = 0 ; i < N_x ; i++){
-	for(j = 0 ; j < N_y ; j++){
-	  fprintf(density,"%d \t %d \t %lf\n", i - N_x/2, j - N_y/2, rho_real[i][j]);
-	  //fprintf(density,"%d \t %d \t %lf\n", i, j, rho_real[i][j]);
-	  
-   	  total = total + rho_real[i][j];
-	  rho_real[i][j] = 0.0;
-	}
-      }
-      fprintf(density,"\n\n");
-      if(t%10 == 0){printf("time=%d \t total_prob=%lf \n",t,total);}
-    }
-  
-  return ;
-}
+plt.close('all')
+file.close()
